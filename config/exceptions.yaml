@@ -51,12 +51,16 @@ pii_policy:
 # Agent Authentication Exceptions
 agent_auth_policy:
   exceptions:
-    - agent: health_check
+            - agent: health_check
       reason: "System health monitoring"
-      bypass_auth: true
+      bypass_auth: false
+      token_type: service_account
       allowed_endpoints:
         - /health
         - /metrics
+      restrictions:
+        - inference_not_allowed: true  # These endpoints MUST NOT trigger LLM inference
+        - llm_endpoints_require_auth: true
 
     - agent: internal_scheduler
       reason: "Scheduled task execution"
@@ -68,8 +72,14 @@ prompt_injection_policy:
   exceptions:
     - context: code_review
       reason: "Legitimate code analysis may contain suspicious patterns"
-      reduced_sensitivity: true
-      log_only: true
+      reduced_sensitivity: false
+      log_only: false
+      action: block
+      audit_required: true
+      allowed_patterns:
+        - code_snippet
+        - syntax_example
+      notify_admin: true
 
     - context: security_training
       reason: "Security training content includes attack examples"
