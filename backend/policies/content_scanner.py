@@ -15,10 +15,70 @@ AFTER UNIFAI REMEDIATION:
 - Integration with prompt injection detector
 """
 
+import hashlib
+import json
 import logging
 import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
+
+_AUDIT_LOG_PATH = Path("audit_logs/content_scanner_audit.jsonl")
+_SCANNER_VERSION = "content_scanner/1.0.0"
+_PRINCIPAL = "content_scanner_service"
+
+
+def _write_audit_record(record: dict) -> None:
+    """Append a single audit record as a JSON line to the audit log (append-only)."""
+    _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _AUDIT_LOG_PATH.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, default=str) + "\n")
+
+# PII patterns for redaction
+_PII_PATTERNS = [
+    # Email addresses
+    (re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'), '[EMAIL REDACTED]'),
+    # US phone numbers (various formats)
+    (re.compile(r'(\+?1[\s\-.]?)?(\(?\d{3}\)?[\s\-.]?)\d{3}[\s\-.]?\d{4}'), '[PHONE REDACTED]'),
+    # US Social Security Numbers
+    (re.compile(r'\b\d{3}[\s\-]\d{2}[\s\-]\d{4}\b'), '[SSN REDACTED]'),
+    # Credit card numbers (basic pattern)
+    (re.compile(r'\b(?:\d[ \-]?){13,16}\b'), '[CC REDACTED]'),
+    # IP addresses
+    (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), '[IP REDACTED]'),
+    # Dates of birth (common formats)
+    (re.compile(r'\b(0?[1-9]|1[0-2])[/\-](0?[1-9]|[12]\d|3[01])[/\-](\d{2}|\d{4})\b'), '[DATE REDACTED]'),
+    # US ZIP codes
+    (re.compile(r'\b\d{5}(?:[\-]\d{4})?\b'), '[ZIP REDACTED]'),
+    # Passport / ID numbers (generic alphanumeric 6-9 chars preceded by keyword)
+    (re.compile(r'(?i)\b(passport|ssn|sin|id|license)[\s#:]*[A-Z0-9]{6,12}\b'), '[ID REDACTED]'),
+]
+
+
+def _redact_pii(text: str) -> str:
+    """Apply all PII redaction patterns to the given text string."""
+    if not text:
+        return text
+    for pattern, replacement in _PII_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _redact_content(extracted: 'ExtractedContent') -> 'ExtractedContent':
+    """Redact PII from all text fields of an ExtractedContent instance."""
+    extracted.visible_text = _redact_pii(extracted.visible_text or '')
+    if extracted.hidden_text is not None:
+        extracted.hidden_text = _redact_pii(extracted.hidden_text)
+    if extracted.encoded_content:
+        extracted.encoded_content = [_redact_pii(c) for c in extracted.encoded_content]
+    if extracted.metadata:
+        extracted.metadata = {
+            k: _redact_pii(str(v)) if isinstance(v, str) else v
+            for k, v in extracted.metadata.items()
+        }
+    return extracted
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +110,55 @@ class ContentScanner:
 
     def __init__(self):
         self.extraction_count = 0
+
+
+# ---------------------------------------------------------------------------
+# Security helper: malicious pattern detection
+# ---------------------------------------------------------------------------
+import re as _re
+
+_MALICIOUS_PATTERNS = [
+    # Shell command injection
+    (_re.compile(r'(?:^|\s|;|&&|\|\|)\s*(?:bash|sh|zsh|ksh|csh|fish)\s', _re.IGNORECASE | _re.MULTILINE), "shell_interpreter"),
+    (_re.compile(r'(?:^|\s|;|&&|\|\|)\s*(?:cmd\.exe|powershell(?:\.exe)?|pwsh)(?:\s|$)', _re.IGNORECASE | _re.MULTILINE), "windows_shell"),
+    (_re.compile(r'(?:rm\s+-rf|del\s+/[sqf]|format\s+[a-z]:)', _re.IGNORECASE), "destructive_command"),
+    (_re.compile(r'(?:curl|wget)\s+.*(?:http|ftp)s?://', _re.IGNORECASE), "remote_fetch"),
+    (_re.compile(r'(?:nc|netcat|ncat)\s+.*-[el]', _re.IGNORECASE), "reverse_shell"),
+    (_re.compile(r'(?:python|python3|perl|ruby|node)\s+-[ce]\s+["\']?(?:import|require|exec|eval|os\.)', _re.IGNORECASE), "code_execution"),
+    (_re.compile(r'(?:eval|exec)\s*\(', _re.IGNORECASE), "eval_exec"),
+    (_re.compile(r'(?:base64\s+-d|base64\s+--decode)', _re.IGNORECASE), "base64_decode_shell"),
+    # Prompt injection patterns
+    (_re.compile(r'ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?', _re.IGNORECASE), "prompt_injection_ignore"),
+    (_re.compile(r'(?:you\s+are\s+now|act\s+as|pretend\s+(?:you\s+are|to\s+be))\s+(?:an?\s+)?(?:evil|malicious|unrestricted|jailbroken|DAN)', _re.IGNORECASE), "prompt_injection_persona"),
+    (_re.compile(r'(?:system\s*prompt|system\s*message)\s*[:=]', _re.IGNORECASE), "prompt_injection_system"),
+    (_re.compile(r'<\s*(?:system|INST|SYS)\s*>', _re.IGNORECASE), "prompt_injection_tag"),
+    # Binary / executable indicators
+    (_re.compile(r'\x7fELF'), "elf_binary"),
+    (_re.compile(r'MZ\x90\x00'), "pe_binary"),
+    (_re.compile(r'#!/(?:bin|usr/bin|usr/local/bin)/', _re.IGNORECASE), "shebang"),
+]
+
+
+def _scan_for_malicious_patterns(text: str, source: str = "unknown") -> list:
+    """Scan text for shell commands, binary executables, and prompt injection.
+
+    Returns a list of warning strings describing each detected threat.
+    Returns an empty list when no threats are found.
+    """
+    if not text:
+        return []
+    warnings = []
+    for pattern, label in _MALICIOUS_PATTERNS:
+        try:
+            if pattern.search(text):
+                warnings.append(f"malicious_pattern:{label}:source={source}")
+        except Exception:
+            pass
+    return warnings
+
+    async def _redact_extracted(self, content: ExtractedContent) -> ExtractedContent:
+        """Redact PII from all fields of an ExtractedContent before returning."""
+        return _redact_content(content)
 
     async def scan_html(self, html_content: str) -> ExtractedContent:
         """
@@ -92,25 +201,67 @@ class ContentScanner:
             if text:
                 hidden_elements.append(text)
 
-        # VULNERABILITY: Hidden content extracted but not flagged
-        # All content is combined and returned without security warnings
-        hidden_text = '\n'.join(hidden_elements) if hidden_elements else None
+        # Sanitize: hidden content is flagged and NOT forwarded to the LLM.
+        # Only the count/presence is recorded; the raw text is discarded.
+        warnings = []
+        if hidden_elements:
+            warnings.append(
+                f"SECURITY: {len(hidden_elements)} hidden element(s) detected "
+                "and removed before LLM processing (possible prompt-injection attempt)."
+            )
+            logger.warning(
+                "Hidden HTML content detected and suppressed",
+                extra={
+                    "visible_length": len(visible_text),
+                    "hidden_elements_found": len(hidden_elements),
+                    "action": "hidden_content_redacted",
+                }
+            )
+        else:
+            logger.info(
+                "HTML content scanned – no hidden elements found",
+                extra={"visible_length": len(visible_text)}
+            )
 
-        logger.info(
-            "HTML content scanned",
-            extra={
-                "visible_length": len(visible_text),
-                "hidden_elements_found": len(hidden_elements),
-                # VULNERABILITY: Hidden content logged without alert
-                "hidden_preview": hidden_text[:100] if hidden_text else None
-            }
-        )
+                warnings = None
+        if hidden_elements:
+            warnings = [
+                f"Hidden content detected and suppressed: {len(hidden_elements)} element(s) "
+                f"with CSS-hiding styles or classes were found and excluded from output "
+                f"to prevent prompt injection or data leakage."
+            ]
+            logger.warning(
+                "Hidden content suppressed from output",
+                extra={
+                    "hidden_elements_count": len(hidden_elements),
+                    "action": "suppressed"
+                }
+            )
+
+                # Security: flag hidden content as potential prompt injection threat
+        html_warnings = []
+        if hidden_elements:
+            html_warnings.append(
+                f"SECURITY WARNING: {len(hidden_elements)} hidden element(s) detected in HTML content. "
+                "Hidden text may contain prompt injection payloads and has been quarantined."
+            )
+            logger.warning(
+                "Hidden HTML elements detected — potential prompt injection risk",
+                extra={
+                    "hidden_element_count": len(hidden_elements),
+                    "hidden_preview": hidden_text[:100] if hidden_text else None,
+                }
+            )
+            # Do NOT pass hidden_text to downstream LLM components
+            hidden_text = None
 
         return ExtractedContent(
             visible_text=visible_text,
             hidden_text=hidden_text,
-            # VULNERABILITY: No warnings generated for hidden content
-            warnings=None
+            warnings=html_warnings if html_warnings else None
+        ) to prevent injection/leakage
+            hidden_text=None,
+            warnings=warnings
         )
 
     async def scan_pdf_text(self, text_content: str) -> ExtractedContent:
@@ -136,11 +287,24 @@ class ContentScanner:
             if char in text_content:
                 suspicious_patterns.append(f"invisible_char_{ord(char)}")
 
-        # VULNERABILITY: Patterns detected but not flagged as security concern
+        # Threat analysis: flag and block suspicious PDF patterns
+        pdf_warnings = []
         if suspicious_patterns:
-            logger.debug(
-                "Suspicious patterns in PDF",
-                extra={"patterns": suspicious_patterns}
+            warning_msg = (
+                f"SECURITY ALERT: Suspicious patterns detected in PDF content: {suspicious_patterns}. "
+                "This may indicate hidden or obfuscated prompt-injection content."
+            )
+            pdf_warnings.append(warning_msg)
+            logger.warning(
+                "Suspicious patterns detected in PDF — potential hidden content",
+                extra={
+                    "patterns": suspicious_patterns,
+                    "threat": "pdf_hidden_content",
+                }
+            )
+            raise ValueError(
+                "Uploaded PDF rejected: suspicious hidden-content patterns detected "
+                f"({suspicious_patterns}). File may contain malicious prompt-injection instructions."
             )
 
         return ExtractedContent(
@@ -158,6 +322,16 @@ class ContentScanner:
         """
         # Extract text from relevant metadata fields
         text_fields = []
+        # Allowlist of safe, structured metadata fields only — free-text fields are excluded
+        SAFE_METADATA_FIELDS = {
+            'Make', 'Model', 'DateTime', 'DateTimeOriginal', 'DateTimeDigitized',
+            'ExifImageWidth', 'ExifImageHeight', 'Orientation', 'XResolution',
+            'YResolution', 'ResolutionUnit', 'ColorSpace', 'Flash',
+            'FocalLength', 'ISOSpeedRatings', 'ExposureTime', 'FNumber',
+            'Software',
+        }
+        metadata = {k: v for k, v in metadata.items() if k in SAFE_METADATA_FIELDS}
+
         dangerous_fields = ['Comment', 'UserComment', 'ImageDescription',
                           'XPComment', 'XPSubject', 'XPTitle']
 
@@ -222,6 +396,57 @@ class ContentScanner:
 
         return decoded_contents
 
+# ---------------------------------------------------------------------------
+# Singapore PII scanning helper
+# ---------------------------------------------------------------------------
+
+_SG_PII_PATTERNS: list[tuple[str, re.Pattern]] = [
+    # NRIC / FIN  – S/T/F/G followed by 7 digits and a letter
+    ("NRIC/FIN", re.compile(r'\b[STFG]\d{7}[A-Z]\b', re.IGNORECASE)),
+    # Singapore passport – starts with E/K followed by 7 digits
+    ("Passport", re.compile(r'\b[EK]\d{7}[A-Z]\b', re.IGNORECASE)),
+    # Singapore phone numbers – +65 or 65 prefix, 8 digits starting with 6/8/9
+    ("SG Phone", re.compile(r'(?:\+65|\b65)[\s-]?[689]\d{7}\b')),
+    # Singapore postal code – 6-digit code (common format)
+    ("SG Postal Code", re.compile(r'\bSingapore\s+\d{6}\b', re.IGNORECASE)),
+    # CPF account number – 9 digits (common representation)
+    ("CPF", re.compile(r'\bCPF[:\s#-]*\d{9}\b', re.IGNORECASE)),
+]
+
+
+class SingaporePIIDetectedError(ValueError):
+    """Raised when Singapore PII is found in uploaded file content."""
+
+
+def _scan_for_singapore_pii(text: str) -> None:
+    """
+    Scan *text* for Singapore-specific PII categories.
+
+    Raises SingaporePIIDetectedError listing every category found.
+    Categories checked:
+      - NRIC / FIN numbers
+      - Singapore passport numbers
+      - Singapore phone numbers (+65 prefix)
+      - Singapore postal codes
+      - CPF account numbers
+    """
+    found: list[str] = []
+    for label, pattern in _SG_PII_PATTERNS:
+        matches = pattern.findall(text)
+        if matches:
+            found.append(f"{label} ({len(matches)} occurrence(s))")
+            logger.warning(
+                "Singapore PII detected in uploaded content",
+                extra={"pii_category": label, "occurrences": len(matches)},
+            )
+
+    if found:
+        raise SingaporePIIDetectedError(
+            "Uploaded file contains Singapore PII and cannot be processed: "
+            + ", ".join(found)
+        )
+
+
     async def combine_for_analysis(
         self,
         extracted: ExtractedContent
@@ -244,9 +469,13 @@ class ContentScanner:
             for i, decoded in enumerate(extracted.encoded_content):
                 parts.append(f"\n[Decoded content {i+1}]:\n{decoded}")
 
-        # VULNERABILITY: All content combined and returned
-        # No security scanning performed before return
-        return '\n'.join(parts)
+        # Combine all parts
+        combined = '\n'.join(parts)
+
+        # Singapore PII scan — raise if PII detected
+        _scan_for_singapore_pii(combined)
+
+        return combined
 
 
 # ============================================================================
