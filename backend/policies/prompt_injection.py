@@ -19,10 +19,13 @@ AFTER UNIFAI REMEDIATION:
 import logging
 import re
 import base64
+import hashlib
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("audit.prompt_injection")
 
 
 @dataclass
@@ -130,17 +133,110 @@ class PromptInjectionDetector:
             "Threat scan requested",
             extra={
                 "source": source,
-                "content_length": len(content) if content else 0,
-                # VULNERABILITY: Content logged without scanning
-                "preview": content[:100] if content else None
+                "content_length": len(content) if content else 0
             }
         )
 
-        # NO-OP: Return empty result without scanning
+        if not content:
+            return ThreatDetectionResult(
+                has_violations=False,
+                threats=[],
+                scanned_content_length=0
+            )
+
+        threats: list[ThreatMatch] = []
+
+        # 1. Check for known prompt injection patterns
+        for pattern in self._compiled_patterns:
+            match = pattern.search(content)
+            if match:
+                threats.append(ThreatMatch(
+                    threat_type="prompt_injection",
+                    severity="high",
+                    description=f"Prompt injection pattern detected: '{pattern.pattern}'",
+                    content_preview=content[max(0, match.start()-20):match.end()+20],
+                    location=f"offset {match.start()}"
+                ))
+
+        # 2. Check for hidden/invisible unicode characters
+        invisible_chars = re.findall(r'[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]', content)
+        if invisible_chars:
+            threats.append(ThreatMatch(
+                threat_type="hidden_text",
+                severity="medium",
+                description=f"Invisible/hidden unicode characters detected ({len(invisible_chars)} occurrences)",
+                content_preview=repr(content[:100]),
+                location="document body"
+            ))
+
+        # 3. Decode and scan base64-encoded content
+        b64_candidates = re.findall(r'(?:[A-Za-z0-9+/]{20,}={0,2})', content)
+        for candidate in b64_candidates:
+            try:
+                decoded = base64.b64decode(candidate).decode('utf-8', errors='ignore')
+                for pattern in self._compiled_patterns:
+                    match = pattern.search(decoded)
+                    if match:
+                        threats.append(ThreatMatch(
+                            threat_type="encoded_content",
+                            severity="critical",
+                            description=f"Prompt injection pattern found inside base64-decoded content: '{pattern.pattern}'",
+                            content_preview=decoded[:80],
+                            location=f"base64 blob starting at offset {content.index(candidate)}"
+                        ))
+                        break
+                # Also check decoded content for shell commands
+                shell_match = re.search(
+                    r'(?:^|\s)(?:bash|sh|cmd|powershell|exec|eval|system|os\.system|subprocess)\b',
+                    decoded, re.IGNORECASE
+                )
+                if shell_match:
+                    threats.append(ThreatMatch(
+                        threat_type="encoded_content",
+                        severity="critical",
+                        description="Shell command found inside base64-decoded content",
+                        content_preview=decoded[:80],
+                        location=f"base64 blob starting at offset {content.index(candidate)}"
+                    ))
+            except Exception:
+                pass
+
+        # 4. Detect unicode homoglyph attacks by normalising and re-checking
+        normalised = content
+        for homoglyph, replacement in self.HOMOGLYPH_MAP.items():
+            normalised = normalised.replace(homoglyph, replacement)
+        if normalised != content:
+            for pattern in self._compiled_patterns:
+                match = pattern.search(normalised)
+                if match:
+                    threats.append(ThreatMatch(
+                        threat_type="unicode_attack",
+                        severity="high",
+                        description=f"Homoglyph-obfuscated injection pattern detected: '{pattern.pattern}'",
+                        content_preview=normalised[max(0, match.start()-20):match.end()+20],
+                        location=f"offset {match.start()} (after homoglyph normalisation)"
+                    ))
+
+        # 5. Check for shell command injection patterns
+        shell_pattern = re.compile(
+            r'(?:^|[\s;|&`$])(?:bash|sh|zsh|cmd\.exe|powershell|exec|eval|system|'
+            r'os\.system|subprocess\.(?:call|run|Popen)|`[^`]+`|\$\([^)]+\))',
+            re.IGNORECASE | re.MULTILINE
+        )
+        shell_match = shell_pattern.search(content)
+        if shell_match:
+            threats.append(ThreatMatch(
+                threat_type="prompt_injection",
+                severity="critical",
+                description="Shell command injection pattern detected in prompt",
+                content_preview=content[max(0, shell_match.start()-10):shell_match.end()+20],
+                location=f"offset {shell_match.start()}"
+            ))
+
         return ThreatDetectionResult(
-            has_violations=False,
-            threats=[],
-            scanned_content_length=len(content) if content else 0
+            has_violations=len(threats) > 0,
+            threats=threats,
+            scanned_content_length=len(content)
         )
 
     async def detect_hidden_text(self, content: str) -> list[ThreatMatch]:
@@ -186,8 +282,22 @@ class PromptInjectionDetector:
         - Role-playing attacks
         - Delimiter injection
         """
-        # VULNERABILITY: Pattern matching not performed
-        return []
+        matches = []
+        if not content:
+            return matches
+        for pattern in self._compiled_patterns:
+            for m in pattern.finditer(content):
+                matches.append(
+                    ThreatMatch(
+                        threat_type="prompt_injection",
+                        matched_text=m.group(0),
+                        start=m.start(),
+                        end=m.end(),
+                        severity="high",
+                        description=f"Prompt injection pattern detected: '{m.group(0)}'"
+                    )
+                )
+        return matches
 
     async def detect_unicode_attacks(self, content: str) -> list[ThreatMatch]:
         """
