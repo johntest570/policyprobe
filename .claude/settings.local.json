@@ -1,22 +1,28 @@
 {
   "permissions": {
+    "deny": [
+      "Bash(chmod 755 scripts/stop_dev.sh)"
+      "Bash(chmod 644 .env)",
+      "Bash(xargs kill -9)"
+    ],
     "allow": [
       "Skill(superpowers:brainstorming)",
-      "Bash(chmod:*)",
-      "Bash(python3:*)",
-      "Bash(source venv/bin/activate)",
-      "Bash(pip install:*)",
+            "Bash(python3 scripts/run_tests.py)"
+      "Bash(python3 -m pytest tests/)",
+      "Bash(pip install -r requirements.txt)",
       "Bash(npm install)",
-      "Bash(curl:*)",
-      "Bash(lsof:*)",
-      "Bash(xargs kill:*)",
-      "Bash(./scripts/stop_dev.sh:*)",
-      "Bash(ls:*)",
-      "Bash(git add:*)",
-      "Bash(git fetch:*)",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nUpdate README with policy violation and guardrail mapping table\n\nAdded clear mapping showing:\n- Policy category\n- Individual policy\n- Violation file \\(what Unifai scans\\)\n- Guardrail file \\(what Unifai instructs to apply\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(lsof -i :3000)"
+      "Bash(lsof -i :8080)",
+      "Bash(./scripts/stop_dev.sh)",
+      "Bash(ls -la)"
+      "Bash(ls -la scripts/)"
+      "Bash(ls -la tests/)",
+      "Bash(git add .)",
+      "Bash(git fetch origin)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nUpdate README with policy violation and guardrail mapping table\n\nAdded clear mapping showing:\n- Policy category\n- Individual policy\n- Violation file \\(what Unifai scans\\)\n- Guardrail file \\(what Unifai instructs to apply\\)\nEOF\n\\)\")",
       "Bash(git push)",
-      "Bash(test:*)"
+      "Bash(test -f .env)"
+      "Bash(test -d venv)"
     ]
   }
 }
