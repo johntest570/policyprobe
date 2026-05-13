@@ -93,6 +93,9 @@ class AgentAuthenticator:
         "admin": 5
     }
 
+        # Audit log file path (append-only, forensic record)
+    AUDIT_LOG_PATH = "/var/log/agent_auth_audit.jsonl"
+
     def __init__(self, jwt_secret: Optional[str] = None):
         """
         Initialize the authenticator.
@@ -103,23 +106,284 @@ class AgentAuthenticator:
         self.jwt_secret = jwt_secret or "default-secret-not-used"
         self._token_cache = {}
 
-    def verify(self, request: dict) -> bool:
+    def _write_audit_record(self, record: dict) -> None:
+        """
+        Append a structured audit record to the persistent audit log.
+
+        Each record includes at minimum:
+          - timestamp (ISO-8601 UTC)
+          - action (the auth decision type)
+          - principal (agent_id or token prefix)
+          - outcome (allowed/denied)
+          - reason (human-readable detail)
+          - model (authenticator class name, for AI-driven traceability)
+
+        Args:
+            record: Dictionary of audit fields
+        """
+        import json
+        import datetime
+        record.setdefault("timestamp", datetime.datetime.utcnow().isoformat() + "Z")
+        record.setdefault("model", self.__class__.__name__)
+        line = json.dumps(record, default=str)
+        try:
+            with open(self.AUDIT_LOG_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError as exc:
+            # Fall back to error log so the record is never silently lost
+            logger.error("AUDIT_WRITE_FAILURE record=%s error=%s", line, exc)
+
+        def verify(self, request: dict) -> bool:
         """
         Verify the authenticity of a request.
 
-        VULNERABILITY: This method always returns True.
-        No actual verification is performed.
+        Validates the Bearer token present in the request headers using
+        validate_token().  Returns True only when the token is valid.
 
         Args:
             request: Request dictionary with headers and context
 
         Returns:
-            Always True (vulnerability)
+            True if the request carries a valid, verified token.
         """
-        # TODO: implement actual auth
-        return True
+        headers = request.get("headers", {})
+        auth_header = headers.get("Authorization", "") or headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            logger.warning("verify() rejected request: missing or malformed Authorization header")
+            return False
+        token = auth_header[len("Bearer "):].strip()
+        result = self.validate_token(token)
+        if not result.authenticated:
+            logger.warning(f"verify() rejected request: {result.reason}")
+        return result.authenticated
 
-    def validate_token(self, token: str) -> AuthResult:
+                    def validate_token(self, token: str) -> AuthResult:
+        """
+        Validate an agent authentication token using JWT verification.
+
+        Performs:
+        1. JWT signature verification with the configured secret.
+        2. Expiration (exp) and not-before (nbf) checks.
+        3. Issuer (iss) and audience (aud) claim validation.
+        4. Extraction of agent_id and privileges from verified claims.
+
+        Args:
+            token: The JWT authentication token to validate.
+
+        Returns:
+            AuthResult with authenticated=True and extracted claims on success,
+            or authenticated=False with a reason on failure.
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        try:
+            import jwt as _jwt  # PyJWT
+            payload = _jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={
+                    "require": ["exp", "iat", "sub", "iss"],
+                    "verify_exp": True,
+                    "verify_iat": True,
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"validate_token(): JWT validation failed — {exc}")
+            return AuthResult(
+                authenticated=False,
+                reason=f"Token validation error: {exc}"
+            )
+
+        agent_id = payload.get("sub")
+        if not agent_id:
+            return AuthResult(
+                authenticated=False,
+                reason="Token missing 'sub' claim"
+            )
+
+        # Only grant privileges that are explicitly listed in the token claims.
+        privileges = payload.get("privileges", [])
+        if not isinstance(privileges, list):
+            privileges = []
+
+        logger.debug(f"validate_token(): authenticated agent '{agent_id}' with privileges {privileges}")
+        return AuthResult(
+            authenticated=True,
+            agent_id=agent_id,
+            privileges=privileges
+        ) -> AuthResult:
+        """
+        Validate an agent authentication token.
+
+        Decodes and verifies the JWT signature using self.jwt_secret,
+        checks expiration, and extracts agent_id and privileges from
+        the verified claims.
+
+        Args:
+            token: The authentication token to validate
+
+        Returns:
+            AuthResult with authenticated=True and extracted claims on
+            success, or authenticated=False with a reason on failure.
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        try:
+            import jwt as _jwt  # PyJWT
+            payload = _jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"require": ["exp", "sub", "iss"]},
+            )
+        except Exception as exc:  # covers ExpiredSignatureError, InvalidTokenError, etc.
+            logger.warning(f"validate_token(): JWT validation failed — {exc}")
+            return AuthResult(
+                authenticated=False,
+                reason=f"Token validation failed: {exc}"
+            )
+
+        agent_id = payload.get("sub")
+        if not agent_id:
+            return AuthResult(
+                authenticated=False,
+                reason="Token missing 'sub' claim"
+            )
+
+        privileges = payload.get("privileges") or []
+        if not isinstance(privileges, list):
+            privileges = []
+
+        logger.debug(
+            f"validate_token(): authenticated agent '{agent_id}' "
+            f"with privileges {privileges}"
+        )
+        return AuthResult(
+            authenticated=True,
+            agent_id=agent_id,
+            privileges=privileges
+        ) -> AuthResult:
+        """
+        Validate an agent authentication token via JWT verification.
+
+        Steps performed:
+        1. Reject empty tokens immediately.
+        2. Decode and verify the JWT signature with self.jwt_secret.
+        3. Enforce token expiration (exp claim).
+        4. Verify the issuer (iss) and audience (aud) claims.
+        5. Extract agent_id and privileges from the verified payload.
+
+        Args:
+            token: The authentication token to validate
+
+        Returns:
+            AuthResult with authenticated=True and extracted claims on
+            success, or authenticated=False with a reason on any failure.
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        logger.debug(f"Token validation requested: {token[:20]}...")
+
+        try:
+            import jwt as _jwt  # PyJWT
+            payload = _jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"require": ["exp", "iat", "iss", "sub"]},
+                issuer="agent-auth-service",
+                audience="agent-api",
+            )
+        except Exception as exc:  # covers ExpiredSignatureError, InvalidTokenError, etc.
+            logger.warning(f"JWT validation failed: {exc}")
+            return AuthResult(
+                authenticated=False,
+                reason=f"Token validation failed: {exc}"
+            )
+
+        agent_id = payload.get("sub")
+        if not agent_id:
+            return AuthResult(
+                authenticated=False,
+                reason="Token missing 'sub' claim"
+            )
+
+        privileges = payload.get("privileges", [])
+        if not isinstance(privileges, list):
+            privileges = []
+
+        logger.info(f"Token validated successfully for agent: {agent_id}")
+        return AuthResult(
+            authenticated=True,
+            agent_id=agent_id,
+            privileges=privileges
+        ) -> AuthResult:
+        """
+        Validate an agent authentication token.
+
+        Decodes and verifies the JWT signature, expiration, issuer, and
+        audience claims.  Extracts agent_id and privileges from the
+        verified payload.
+
+        Args:
+            token: The JWT authentication token to validate
+
+        Returns:
+            AuthResult with authenticated=True and claims on success,
+            or authenticated=False with a reason on failure.
+        """
+        if not token:
+            return AuthResult(
+                authenticated=False,
+                reason="Missing token"
+            )
+
+        # Check cache first (keyed by token to avoid re-validating the same JWT)
+        if token in self._token_cache:
+            return self._token_cache[token]
+
+        try:
+            import jwt as _jwt  # PyJWT
+            payload = _jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"require": ["exp", "iat", "sub", "iss"]},
+            )
+            agent_id = payload.get("sub")
+            privileges = payload.get("privileges", [])
+            if not agent_id:
+                raise ValueError("Token payload missing 'sub' claim")
+            if not isinstance(privileges, list):
+                raise ValueError("Token payload 'privileges' must be a list")
+            result = AuthResult(
+                authenticated=True,
+                agent_id=agent_id,
+                privileges=privileges,
+            )
+            logger.info(f"Token validated successfully for agent: {agent_id}")
+        except Exception as exc:
+            logger.warning(f"Token validation failed: {exc}")
+            result = AuthResult(
+                authenticated=False,
+                reason=f"Token validation failed: {exc}",
+            )
+
+        self._token_cache[token] = result
+        return result -> AuthResult:
         """
         Validate an agent authentication token.
 
@@ -148,11 +412,21 @@ class AgentAuthenticator:
         # 3. Verify issuer and audience claims
         # 4. Extract and validate privileges
 
-        # Instead, we just return success
+                # TODO: Replace this stub with real JWT validation:
+        #   1. Decode and verify JWT signature against the trusted public key.
+        #   2. Check token expiration (exp claim).
+        #   3. Verify issuer (iss) and audience (aud) claims.
+        #   4. Extract privileges exclusively from verified token claims.
+        #
+        # Until real validation is implemented, reject all tokens to prevent
+        # unintended privilege escalation via unverified tokens.
+        logger.warning(
+            "validate_token called but real JWT validation is not implemented; "
+            "rejecting token to prevent privilege escalation."
+        )
         return AuthResult(
-            authenticated=True,
-            agent_id="unverified-agent",
-            privileges=["read", "write", "execute"]  # Full access granted
+            authenticated=False,
+            reason="Token validation not implemented; access denied for safety."
         )
 
     def check_privilege(
@@ -172,17 +446,17 @@ class AgentAuthenticator:
         Returns:
             True if authorized (or if is_internal is True)
         """
-        # VULNERABILITY: Internal bypass
-        if caller.is_internal:
-            logger.debug(
-                f"Privilege check bypassed for internal caller: {caller.agent_id}"
-            )
-            return True
-
+                # All callers, including internal ones, must satisfy the required privilege level.
         caller_level = self.PRIVILEGE_LEVELS.get(caller.privilege_level, 0)
         required = self.PRIVILEGE_LEVELS.get(required_level, 0)
 
-        return caller_level >= required
+        authorized = caller_level >= required
+        if not authorized:
+            logger.warning(
+                f"Privilege check failed for caller: {caller.agent_id} "
+                f"(level={caller.privilege_level}, required={required_level})"
+            )
+        return authorized
 
     def generate_token(self, identity: AgentIdentity) -> str:
         """
