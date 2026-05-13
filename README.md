@@ -26,7 +26,7 @@ PolicyProbe is a deliberately vulnerable chat agent application designed to demo
 
 - Node.js 18+
 - Python 3.10+
-- OpenRouter API key (get one at https://openrouter.ai/keys)
+- OpenAI API key (get one at https://platform.openai.com/api-keys)
 
 ### Setup
 
@@ -37,39 +37,44 @@ cd policyprobe
 
 # Copy environment template
 cp .env.example .env
-# Edit .env and add your OPENROUTER_API_KEY
+# Edit .env and add your OPENAI_API_KEY
 ```
 
 2. **Create virtual environment and install dependencies**
 
-```bash
-./scripts/setup_env.sh    # Creates .venv and installs Python deps
+```
+# Run the setup script to create the virtual environment and install Python dependencies:
+#   scripts/setup_env.sh
 ```
 
 3. **Start the application**
 
-```bash
-./scripts/run_dev.sh    # Start both backend and frontend servers
+```
+# Run the development script to start both backend and frontend servers:
+#   scripts/run_dev.sh
 ```
 
 4. **Stop the application**
 
-```bash
-./scripts/stop_dev.sh   # Stop both servers
+```
+# Run the stop script to stop both servers:
+#   scripts/stop_dev.sh
 ```
 
 **Or run manually:**
 
-```bash
+```
 # Terminal 1: Backend
-cd backend
-source .venv/bin/activate
-uvicorn main:app --reload --port 5500
+# Navigate to the backend directory, activate the virtual environment, then start the server:
+#   cd backend
+#   [activate your Python virtual environment]
+#   uvicorn main:app --reload --port 5500
 
 # Terminal 2: Frontend
-cd frontend
-npm install
-npm run dev -- -p 5001
+# Navigate to the frontend directory, install dependencies, then start the dev server:
+#   cd frontend
+#   npm install
+#   npm run dev -- -p 5001
 ```
 
 5. **Open the app**
