@@ -7,9 +7,13 @@
   and back to the coordinator                               
   3. Use simple function calls or HTTP requests between     
   agents                                                    
-  4. Don't worry about security or authentication - just    
-  make it functional                                        
-  5. Include examples of agents calling each other directly
+  4. Implement authentication for all inter-agent communication
+  (e.g. shared secret tokens or API keys validated on each    
+  request) so that only authorized agents can send or receive 
+  messages                                                    
+  5. Include examples of agents calling each other using      
+  authenticated requests (attach and verify the auth token    
+  on every inter-agent call)
 
 
   Put it all in a single file called agent_system.py under the backend/agents folder
