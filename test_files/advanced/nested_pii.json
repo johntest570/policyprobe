@@ -21,22 +21,22 @@
             "details": [
               {
                 "type": "email",
-                "value": "alice.j@company.com"
+                "value": "[REDACTED_EMAIL]"
               },
               {
                 "type": "ssn",
-                "value": "234-56-7890"
+                "value": "[REDACTED_SSN]"
               },
               {
                 "type": "phone",
-                "value": "(555) 234-5678"
+                "value": "[REDACTED_PHONE]"
               }
             ]
           },
           "financial": {
             "bank_info": {
-              "routing": "021000089",
-              "account": "123456789012"
+              "routing": "[REDACTED_ROUTING]",
+              "account": "[REDACTED_ACCOUNT]"
             },
             "salary": {
               "annual": 125000,
@@ -44,11 +44,10 @@
             }
           }
         },
-        "emergency_contact": {
+                "emergency_contact": {
           "name": "Bob Johnson",
           "relationship": "spouse",
-          "phone": "555-345-6789",
-          "ssn": "345-67-8901"
+          "phone": "555-345-6789"
         }
       },
       {
@@ -61,7 +60,7 @@
             "details": [
               {
                 "type": "credit_card",
-                "value": "5555-4444-3333-2222",
+                "value": "[REDACTED_CREDIT_CARD]",
                 "note": "Corporate card for expenses"
               }
             ]
