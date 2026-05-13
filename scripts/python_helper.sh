@@ -17,7 +17,7 @@ check_python_version() {
     local python_cmd="$1"
 
     # Check if command exists
-    if ! command -v "$python_cmd" &> /dev/null; then
+    if ! type -P "$python_cmd" > /dev/null 2>&1; then
         return 1
     fi
 
@@ -27,7 +27,7 @@ check_python_version() {
 
     # Parse version (e.g., "Python 3.12.1" -> "3.12.1")
     local version
-    version=$(echo "$version_output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    version=$(printf '%s' "$version_output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 
     if [ -z "$version" ]; then
         return 1
@@ -35,8 +35,8 @@ check_python_version() {
 
     # Extract major and minor versions
     local major minor
-    major=$(echo "$version" | cut -d. -f1)
-    minor=$(echo "$version" | cut -d. -f2)
+    major=$(printf '%s' "$version" | cut -d. -f1)
+    minor=$(printf '%s' "$version" | cut -d. -f2)
 
     # Check if version meets minimum
     if [ "$major" -gt "$PYTHON_MIN_MAJOR" ]; then
@@ -56,7 +56,7 @@ find_python() {
             echo "$PYTHON_PATH"
             return 0
         else
-            echo "ERROR: PYTHON_PATH ($PYTHON_PATH) does not meet minimum version requirement (Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+)" >&2
+            printf 'ERROR: PYTHON_PATH (%s) does not meet minimum version requirement (Python %s.%s+)\n' "$PYTHON_PATH" "$PYTHON_MIN_MAJOR" "$PYTHON_MIN_MINOR" >&2
             return 1
         fi
     fi
@@ -82,23 +82,28 @@ find_python() {
     return 1
 }
 
-# Main: Find and export PYTHON_CMD
-PYTHON_CMD=$(find_python)
-
-if [ -z "$PYTHON_CMD" ]; then
-    echo "=========================================="
-    echo "  ERROR: No suitable Python found!"
-    echo "=========================================="
+# Main: Find and # HITL approval gate: require human confirmation before exporting PYTHON_CMD
+# Skip interactive prompt only when PYTHON_HELPER_AUTO_APPROVE=1 is explicitly set
+if [ "${PYTHON_HELPER_AUTO_APPROVE:-0}" != "1" ]; then
+    PYTHON_VERSION_PREVIEW=$("$PYTHON_CMD" --version 2>&1)
+    echo "========================================="
+    echo "  HITL Approval Required"
+    echo "========================================="
+    echo "  The following Python interpreter will be exported into your environment:"
+    echo "    Command : $PYTHON_CMD"
+    echo "    Version : $PYTHON_VERSION_PREVIEW"
     echo ""
-    echo "  This project requires Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR} or newer."
-    echo ""
-    echo "  Options:"
-    echo "    1. Install Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ from https://python.org"
-    echo "    2. Use pyenv: pyenv install 3.12"
-    echo "    3. Specify a Python path: PYTHON_PATH=/path/to/python ./scripts/setup_env.sh"
-    echo ""
-    echo "=========================================="
-    exit 1
+    printf "  Approve exporting PYTHON_CMD? [y/N]: "
+    read -r HITL_RESPONSE </dev/tty
+    case "$HITL_RESPONSE" in
+        [yY][eE][sS]|[yY])
+            : # approved — continue
+            ;;
+        *)
+            echo "  Operation cancelled by user. PYTHON_CMD will NOT be exported." >&2
+            return 1 2>/dev/null || exit 1
+            ;;
+    esac
 fi
 
 export PYTHON_CMD
@@ -107,4 +112,28 @@ export PYTHON_CMD
 if [ "${PYTHON_HELPER_QUIET:-0}" != "1" ]; then
     PYTHON_VERSION=$("$PYTHON_CMD" --version 2>&1)
     echo "Using: $PYTHON_VERSION ($PYTHON_CMD)"
+find_python)
+
+if [ -z "$PYTHON_CMD" ]; then
+    printf '==========================================\n' >&2
+    printf '  ERROR: No suitable Python found!\n' >&2
+    printf '==========================================\n' >&2
+    printf '\n' >&2
+    printf '  This project requires Python %s.%s or newer.\n' "$PYTHON_MIN_MAJOR" "$PYTHON_MIN_MINOR" >&2
+    printf '\n' >&2
+    printf '  Options:\n' >&2
+    printf '    1. Install Python %s.%s+ from https://python.org\n' "$PYTHON_MIN_MAJOR" "$PYTHON_MIN_MINOR" >&2
+    printf '    2. Use pyenv: pyenv install 3.12\n' >&2
+    printf '    3. Specify a Python path: PYTHON_PATH=/path/to/python ./scripts/setup_env.sh\n' >&2
+    printf '\n' >&2
+    printf '==========================================\n' >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+export PYTHON_CMD
+
+# Display found Python version (only if not being sourced silently)
+if [ "${PYTHON_HELPER_QUIET:-0}" != "1" ]; then
+    PYTHON_VERSION=$("$PYTHON_CMD" --version 2>&1)
+    printf 'Using: %s (%s)\n' "$PYTHON_VERSION" "$PYTHON_CMD"
 fi
