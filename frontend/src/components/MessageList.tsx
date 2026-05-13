@@ -54,11 +54,27 @@ export function MessageList({ messages }: MessageListProps) {
                 </div>
               )}
 
-              {/* Message Content or Error */}
+                            {/* Message Content or Error */}
               {message.error ? (
                 <ErrorDisplay error={message.error} />
               ) : (
                 <div className="message-content text-gray-100">
+                  {maskPII(message.content)}
+                </div>
+              )}
+                >
+                  {message.role === 'assistant' && (
+                    <div className="flex items-center gap-1 mb-1">
+                      <span
+                        className="inline-flex items-center gap-1 text-xs font-medium text-teal-400 border border-teal-700 rounded px-1.5 py-0.5 bg-teal-950"
+                        title={`AI-generated content | Generated at: ${message.timestamp.toISOString()}`}
+                        aria-label="AI-generated content"
+                      >
+                        <Bot className="w-3 h-3" />
+                        AI-Generated
+                      </span>
+                    </div>
+                  )}
                   {message.content}
                 </div>
               )}
@@ -73,6 +89,42 @@ export function MessageList({ messages }: MessageListProps) {
       ))}
     </div>
   )
+}
+
+/**
+ * Replaces common PII patterns in a string with redacted placeholders.
+ * Patterns covered: SSN, credit card numbers, phone numbers, email addresses,
+ * and simple US street addresses.
+ */
+function maskPII(text: string): string {
+  if (!text) return text
+
+  // SSN: 123-45-6789 or 123 45 6789 or 123456789
+  text = text.replace(/\b\d{3}[\s-]\d{2}[\s-]\d{4}\b/g, '[SSN REDACTED]')
+  text = text.replace(/\b\d{9}\b/g, '[SSN REDACTED]')
+
+  // Credit card numbers (13–16 digits, optionally separated by spaces or dashes)
+  text = text.replace(/\b(?:\d[ -]?){13,16}\b/g, '[CC REDACTED]')
+
+  // Phone numbers: various formats
+  text = text.replace(
+    /\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g,
+    '[PHONE REDACTED]'
+  )
+
+  // Email addresses
+  text = text.replace(
+    /\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/g,
+    '[EMAIL REDACTED]'
+  )
+
+  // Simple US street addresses: e.g. "123 Main St", "456 Elm Avenue"
+  text = text.replace(
+    /\b\d+\s+[A-Za-z0-9\s]+(?:St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Ln|Lane|Way|Ct|Court|Pl|Place)\b\.?/gi,
+    '[ADDRESS REDACTED]'
+  )
+
+  return text
 }
 
 function formatFileSize(bytes: number): string {
