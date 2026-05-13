@@ -19,14 +19,21 @@ echo "=========================================="
 echo ""
 
 # Find suitable Python interpreter (3.10+)
-source "$PROJECT_ROOT/scripts/python_helper.sh"
+# Validate helper script exists and is a regular file before sourcing
+PYTHON_HELPER="$PROJECT_ROOT/scripts/python_helper.sh"
+if [ ! -f "$PYTHON_HELPER" ] || [ ! -r "$PYTHON_HELPER" ]; then
+    echo "ERROR: python_helper.sh not found or not readable at $PYTHON_HELPER" >&2
+    exit 1
+fi
+# shellcheck source=scripts/python_helper.sh
+. "$PYTHON_HELPER"
 echo ""
 
 # Check for required environment variables
-if [ -z "$OPENROUTER_API_KEY" ]; then
-    echo "WARNING: OPENROUTER_API_KEY not set"
+if [ -z "$OPENAI_API_KEY" ]; then
+    echo "WARNING: OPENAI_API_KEY not set"
     echo "The LLM features will not work without it."
-    echo "Set it with: export OPENROUTER_API_KEY=your_key_here"
+    echo "Set it with: export OPENAI_API_KEY=your_key_here"
     echo ""
 fi
 
@@ -49,15 +56,22 @@ cd "$PROJECT_ROOT/backend"
 if [ ! -d ".venv" ]; then
     echo "Creating Python virtual environment..."
     "$PYTHON_CMD" -m venv .venv
-    source .venv/bin/activate
     echo "Installing Python dependencies..."
-    pip install -r requirements.txt
+    .venv/bin/pip install --require-hashes -r requirements.txt
 else
-    source .venv/bin/activate
+    # Verify venv integrity before use
+    if [ ! -x ".venv/bin/python" ] || [ ! -x ".venv/bin/pip" ]; then
+        echo "ERROR: Virtual environment appears corrupt. Remove .venv and retry." >&2
+        exit 1
+    fi
 fi
+# Use venv binaries directly instead of activating to avoid sourcing arbitrary scripts
+PYTHON_VENV="$PROJECT_ROOT/backend/.venv/bin/python"
+PIP_VENV="$PROJECT_ROOT/backend/.venv/bin/pip"
+UVICORN_VENV="$PROJECT_ROOT/backend/.venv/bin/uvicorn"
 
-# Start uvicorn in background
-uvicorn main:app --reload --host 127.0.0.1 --port 5500 &
+# Start uvicorn in background using venv binary directly
+"$UVICORN_VENV" main:app --reload --host 127.0.0.1 --port 5500 &
 BACKEND_PID=$!
 echo "Backend started (PID: $BACKEND_PID)"
 echo "Backend URL: http://localhost:5500"
@@ -77,7 +91,8 @@ if [ ! -d "node_modules" ]; then
     npm install
 elif [ ! -f "node_modules/.bin/next" ]; then
     echo "⚠️  node_modules exists but is incomplete. Reinstalling..."
-    rm -rf node_modules
+    # Remove only the specific node_modules directory (no wildcard or recursive glob)
+    rm -rf -- "$PROJECT_ROOT/frontend/node_modules"
     npm install
 fi
 
