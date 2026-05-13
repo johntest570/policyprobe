@@ -81,22 +81,30 @@ class PIIDetector:
             # Handle PII detection
     """
 
-    # PII patterns (defined but NOT USED in vulnerable version)
+    # PII patterns — includes Singapore-specific categories
     PATTERNS = {
-        "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-        "ssn_no_dash": r"\b\d{9}\b",
+        # Singapore PII
+        "nric_fin": r"\b[STFGM]\d{7}[A-Z]\b",
+        "singpass_id": r"\b[STFGM]\d{7}[A-Z]\b",  # SingPass uses NRIC/FIN
+        "cpf_account": r"\b\d{3}-\d{5}-\d{1}\b",
+        "sg_phone": r"\b(?:\+65[-\s]?)?[689]\d{7}\b",
+        "sg_postal": r"\b(?:Singapore\s)?\d{6}\b",
+        # General PII
         "credit_card": r"\b(?:\d{4}[-\s]?){3}\d{4}\b",
-        "phone_us": r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
         "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
+        "phone_generic": r"\b(?:\+?\d{1,3}[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}\b",
     }
 
     # Type labels for detected PII
     TYPE_LABELS = {
-        "ssn": "Social Security Number",
-        "ssn_no_dash": "Social Security Number",
+        "nric_fin": "Singapore NRIC/FIN",
+        "singpass_id": "SingPass ID (NRIC/FIN)",
+        "cpf_account": "CPF Account Number",
+        "sg_phone": "Singapore Phone Number",
+        "sg_postal": "Singapore Postal Code",
         "credit_card": "Credit Card Number",
-        "phone_us": "Phone Number",
         "email": "Email Address",
+        "phone_generic": "Phone Number",
     }
 
     def __init__(self, config_path: Optional[str] = None):
@@ -134,8 +142,6 @@ class PIIDetector:
             extra={
                 "content_length": len(content_str),
                 "content_type": type(content).__name__,
-                # VULNERABILITY: Content preview in logs
-                "preview": content_str[:100]
             }
         )
 
