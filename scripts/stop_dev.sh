@@ -6,28 +6,37 @@
 # Run from anywhere: ./scripts/stop_dev.sh
 #
 
-echo "=========================================="
-echo "  Stopping PolicyProbe Servers"
-echo "=========================================="
-echo ""
+printf '==========================================\n'
+printf '  Stopping PolicyProbe Servers\n'
+printf '==========================================\n'
+printf '\n'
+
+# Helper: gracefully stop a process on a given port
+stop_port() {
+    local port="$1"
+    local label="$2"
+    local pid
+    pid=$(lsof -i :"${port}" -t 2>/dev/null)
+    if [ -n "${pid}" ]; then
+        # Send SIGTERM first; escalate to SIGKILL only if process persists
+        kill -TERM "${pid}" 2>/dev/null
+        sleep 1
+        if kill -0 "${pid}" 2>/dev/null; then
+            kill -KILL "${pid}" 2>/dev/null
+        fi
+        printf '\u2713 %s stopped (port %s)\n' "${label}" "${port}"
+    else
+        printf '- %s was not running\n' "${label}"
+    fi
+}
 
 # Stop backend on port 5500
-if lsof -i :5500 -t > /dev/null 2>&1; then
-    lsof -i :5500 -t | xargs kill -9 2>/dev/null
-    echo "✓ Backend stopped (port 5500)"
-else
-    echo "- Backend was not running"
-fi
+stop_port 5500 "Backend"
 
 # Stop frontend on port 5001
-if lsof -i :5001 -t > /dev/null 2>&1; then
-    lsof -i :5001 -t | xargs kill -9 2>/dev/null
-    echo "✓ Frontend stopped (port 5001)"
-else
-    echo "- Frontend was not running"
-fi
+stop_port 5001 "Frontend"
 
-echo ""
-echo "=========================================="
-echo "  All servers stopped"
-echo "=========================================="
+printf '\n'
+printf '==========================================\n'
+printf '  All servers stopped\n'
+printf '==========================================\n'
